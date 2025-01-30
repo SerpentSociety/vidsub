@@ -5,7 +5,6 @@ import ffmpeg
 import json
 import uuid
 import requests
-from datetime import datetime
 from typing import Generator, Optional, List, Dict
 from flask import current_app
 from bson import ObjectId
@@ -24,7 +23,6 @@ class ProcessingSteps:
     DETECT_LANGUAGE = "Detecting language"
     TRANSCRIBE = "Transcribing"
     TRANSLATE = "Translating"
-    SPLIT_SEGMENTS = "Splitting subtitles"
     GENERATE_SRT = "Generating subtitles"
     ADD_SUBTITLES = "Adding subtitles"
     FINALIZE = "Finalizing"
@@ -416,36 +414,6 @@ class VideoService:
                 'sample_text': ''
             }
 
-    def _split_text_into_chunks(self, text: str, max_chars: int) -> List[str]:
-        """Split text into chunks that don't exceed max_chars, preserving word boundaries"""
-        logger.debug(f"Splitting text into max {max_chars} characters")
-        chunks = []
-        current_chunk = []
-        current_length = 0
-        words = text.split()
-        
-        for word in words:
-            word_length = len(word) + 1  # Include space after word
-            if current_length + word_length <= max_chars:
-                current_chunk.append(word)
-                current_length += word_length
-            else:
-                if current_chunk:
-                    chunks.append(' '.join(current_chunk))
-                    current_chunk = [word]
-                    current_length = len(word) + 1
-                else:
-                    # Handle case where a single word exceeds max_chars
-                    chunks.append(word)
-                    current_chunk = []
-                    current_length = 0
-                    
-        if current_chunk:
-            chunks.append(' '.join(current_chunk))
-            
-        logger.debug(f"Split text into {len(chunks)} chunks")
-        return chunks
-
     def _process_subtitles(self, subtitles: list, source_lang: str, target_lang: str) -> list:
         """Process and translate subtitles with enhanced logging"""
         logger.info(f"Processing {len(subtitles)} subtitle segments")
@@ -507,7 +475,7 @@ class VideoService:
         """Main video processing pipeline with enhanced error handling and logging"""
         audio_path = None
         video_id = None
-        process_start_time = datetime.now()  # Renamed to avoid potential naming conflicts
+        start_time = datetime.now()
         
         try:
             video_id = self.validate_and_get_video_id(video_path)
@@ -554,41 +522,7 @@ class VideoService:
                     logger.error(error_msg)
                     raise ValueError(error_msg)
 
-                # Validate segments
-                validated_segments = []
-                for idx, segment in enumerate(segments, 1):
-                    try:
-                        if not isinstance(segment, dict):
-                            logger.warning(f"Skipping invalid segment {idx}: not a dictionary")
-                            continue
-                            
-                        if not all(key in segment for key in ['start', 'end', 'text']):
-                            logger.warning(f"Skipping segment {idx}: missing required keys")
-                            continue
-                            
-                        start = float(segment['start'])
-                        end = float(segment['end'])
-                        text = str(segment['text']).strip()
-                        
-                        if not text:
-                            logger.warning(f"Skipping segment {idx}: empty text")
-                            continue
-                            
-                        if end <= start or start < 0:
-                            logger.warning(f"Skipping segment {idx}: invalid timing (start: {start}, end: {end})")
-                            continue
-                            
-                        validated_segments.append({
-                            'start': start,
-                            'end': end,
-                            'text': text
-                        })
-                    except (ValueError, TypeError) as e:
-                        logger.warning(f"Error validating segment {idx}: {str(e)}")
-                        continue
-
-                segments = validated_segments
-                logger.info(f"Generated {len(segments)} valid segments")
+                logger.info(f"Generated {len(segments)} segments")
                 logger.info(f"Detected language from transcription: {detected_language}")
 
                 yield self._send_progress(ProcessingSteps.TRANSCRIBE, 60, {
@@ -608,95 +542,17 @@ class VideoService:
                     logger.info(f"No translation needed - detected language matches target: {target_lang}")
                     translated_subs = segments
 
-                # Split segments into smaller chunks based on video dimensions
-                try:
-                    yield self._send_progress(ProcessingSteps.SPLIT_SEGMENTS, 82)
-                    logger.info("Starting subtitle segmentation")
+            # Generate subtitles
+            yield self._send_progress(ProcessingSteps.GENERATE_SRT, 85)
+            yield self._send_progress(ProcessingSteps.ADD_SUBTITLES, 90)
+            
+            output_path = self._add_subtitles(video_path, translated_subs, target_lang, user_font_size)
+            
+            if not os.path.exists(output_path):
+                raise FileNotFoundError("Output video not generated")
 
-                    # Get video dimensions early
-                    probe = ffmpeg.probe(video_path)
-                    video_stream = next((s for s in probe['streams'] if s['codec_type'] == 'video'), None)
-                    if not video_stream:
-                        raise ValueError("No video stream found in the input file")
-                    
-                    width = int(video_stream['width'])
-                    height = int(video_stream['height'])
-                    logger.info(f"Video dimensions: {width}x{height}")
-
-                    # Calculate subtitle display properties
-                    (font_size, max_lines, margin_v, 
-                     line_height, h_margin, max_chars_per_line) = self._calculate_subtitle_properties(
-                        width, height, user_font_size
-                    )
-                    max_chars_per_segment = max_chars_per_line * max_lines
-                    logger.info(f"Max characters per segment: {max_chars_per_segment} ({max_lines} lines)")
-
-                    # Process each segment to split if needed
-                    split_segments = []
-                    for seg in translated_subs:
-                        try:
-                            original_text = str(seg.get('text', '')).strip()
-                            start_time = float(seg.get('start', 0))
-                            end_time = float(seg.get('end', 0))
-                            
-                            if not original_text or end_time <= start_time:
-                                logger.warning("Skipping invalid segment during split")
-                                continue
-
-                            duration = end_time - start_time
-
-                            # Split text into appropriate chunks
-                            text_chunks = self._split_text_into_chunks(original_text, max_chars_per_segment)
-                            
-                            if len(text_chunks) <= 1:
-                                split_segments.append(seg)
-                                continue
-
-                            # Calculate time per chunk with minimum duration check
-                            min_duration = 0.5  # Minimum duration per chunk in seconds
-                            chunk_duration = max(duration / len(text_chunks), min_duration)
-                            total_chunks = len(text_chunks)
-                            actual_duration = chunk_duration * total_chunks
-
-                            # Adjust start/end times to prevent overlap
-                            if actual_duration > duration:
-                                chunk_duration = duration / total_chunks
-
-                            for idx, chunk in enumerate(text_chunks):
-                                chunk_start = start_time + idx * chunk_duration
-                                chunk_end = min(start_time + (idx + 1) * chunk_duration, end_time)
-                                
-                                if chunk_end > chunk_start:
-                                    split_segments.append({
-                                        'start': chunk_start,
-                                        'end': chunk_end,
-                                        'text': chunk.strip()
-                                    })
-                        except Exception as e:
-                            logger.warning(f"Error processing segment during split: {str(e)}")
-                            continue
-
-                    logger.info(f"Split {len(translated_subs)} segments into {len(split_segments)} chunks")
-                    translated_subs = split_segments
-
-                except Exception as e:
-                    logger.error(f"Failed to split subtitle segments: {str(e)}")
-                    logger.info("Continuing with original subtitle segments")
-
-                # Generate subtitles
-                yield self._send_progress(ProcessingSteps.GENERATE_SRT, 85)
-                yield self._send_progress(ProcessingSteps.ADD_SUBTITLES, 90)
-                
-                output_path = self._add_subtitles(video_path, translated_subs, target_lang, user_font_size)
-                
-                if not os.path.exists(output_path):
-                    raise FileNotFoundError("Output video not generated")
-
-                Video().update_output_path(video_id, output_path, translated_subs)
-
-            # Calculate processing time
-            end_time = datetime.now()
-            processing_time = (end_time - process_start_time).total_seconds()
+            Video().update_output_path(video_id, output_path, translated_subs)
+            processing_time = (datetime.now() - start_time).total_seconds()
             
             logger.info(f"Video processing completed in {processing_time:.2f} seconds")
             logger.info(f"Output video saved to: {output_path}")
