@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Menu, X, User, LogOut } from 'lucide-react'
 import { useAuth } from '@/context/auth-context'
 import { Skeleton } from '@/components/ui/skeleton'
-import Logo from '@/public/logo.png' // Adjust the path to your logo image
+// import Logo from '@/public/logo.png' 
 
 export default function Header() {
   const [isMenuOpen, setIsMenuOpen] = useState(false)
@@ -24,7 +24,7 @@ export default function Header() {
       <header className="fixed top-0 left-0 right-0 z-50 bg-white/80 dark:bg-gray-900/80 backdrop-blur-md shadow-md">
         <div className="container mx-auto px-4 py-4">
           <div className="flex justify-between items-center">
-            <img src={Logo.src} alt="Logo" className="h-8" />
+            <div className="text-4xl font-extrabold gradient-text">MQAI</div>
             <nav className="hidden md:flex space-x-4">
               <Skeleton className="h-10 w-20" />
               <Skeleton className="h-10 w-20" />
@@ -39,7 +39,7 @@ export default function Header() {
     { href: '/dashboard', label: 'Dashboard' },
     { href: '/profile', label: 'Profile' },
   ] : [
-    { href: '/features', label: 'Features' },
+    { href: '/demo', label: 'Demo' },
     { href: '/pricing', label: 'Pricing' },
     { href: '/contact', label: 'Contact' },
   ]
@@ -54,7 +54,7 @@ export default function Header() {
       <div className="container mx-auto px-4 py-4">
         <div className="flex justify-between items-center">
           <Link href="/">
-            <img src={Logo.src} alt="Logo" className="h-8" />
+            <div className="text-4xl font-extrabold gradient-text">MQAI</div>
           </Link>
           <nav className="hidden md:flex space-x-4">
             {menuItems.map((item) => (
